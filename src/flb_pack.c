@@ -19,6 +19,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 
 #include <fluent-bit/flb_info.h>
 #include <fluent-bit/flb_mem.h>
@@ -85,9 +86,9 @@ static inline int is_float(char *buf, int len)
 }
 
 /* Receive a tokenized JSON message and convert it to MsgPack */
-static char *tokens_to_msgpack(char *js,
+static char *tokens_to_msgpack(char *js, size_t len,
                                jsmntok_t *tokens, int arr_size, int *out_size,
-                               int *last_byte)
+                               int *last_byte, int *is_object)
 {
     int i;
     int flen;
@@ -99,6 +100,21 @@ static char *tokens_to_msgpack(char *js,
 
     if (arr_size == 0) {
         return NULL;
+    }
+
+    /* If requested, check if the JSON string represents a single, complete object */
+    if (is_object) {
+        *is_object = (tokens[0].type == JSMN_OBJECT);
+
+        if (tokens[0].end < len) {
+            for (i = tokens[0].end; i < len; i++) {
+                if (!isspace(js[i])) {
+                    flb_debug("Input '%s' is not pure JSON, found non-whitespace at byte %d: '%c' (%#02x)\n", js, i, js[i], js[i]);
+                    *is_object = 0;
+                    break;
+                }
+            }
+        }
     }
 
     /* initialize buffers */
@@ -195,9 +211,16 @@ int flb_pack_json(char *js, size_t len, char **buffer, size_t *size)
     }
 
     int last;
-    buf = tokens_to_msgpack(js, state.tokens, state.tokens_count, &out, &last);
+    int is_object;
+    buf = tokens_to_msgpack(js, len, state.tokens, state.tokens_count, &out, &last, &is_object);
     if (!buf) {
         ret = -1;
+        goto flb_pack_json_end;
+    }
+
+    if (!is_object) {
+        ret = -1;
+        flb_free(buf);
         goto flb_pack_json_end;
     }
 
@@ -309,8 +332,14 @@ int flb_pack_json_state(char *js, size_t len,
         return ret;
     }
 
-    buf = tokens_to_msgpack(js, state->tokens, state->tokens_count, &out, &last);
+    int is_object;
+    buf = tokens_to_msgpack(js, len, state->tokens, state->tokens_count, &out, &last, &is_object);
     if (!buf) {
+        return -1;
+    }
+
+    if (!is_object) {
+        flb_free(buf);
         return -1;
     }
 
